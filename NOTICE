@@ -2,3 +2,6 @@ HoundCrawler
 Copyright 2026 WarHound AI
 Derived in part from WarHound AI HoundScraper, Apache License 2.0.
 Upstream provenance and original file hashes are recorded in PROVENANCE.json.
+
+This project includes browser_network.py from WarHound AI's HoundBrowser v0.1.0, Apache-2.0. Source: https://github.com/warhoundai/HoundBrowser/blob/v0.1.0/src/houndbrowser/network.py
+No Firecrawl implementation, documentation or assets are included.
