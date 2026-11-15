@@ -1,0 +1,133 @@
+import asyncio
+import logging
+import psycopg
+import fnmatch
+import random
+import time
+import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit,urlunsplit
+from .errors import ScrapeError
+from .models import Options
+from .network import normalize_url,origin
+
+class Worker:
+    def __init__(self,engine):
+        self.engine=engine;self.store=engine.store;self.tasks=set();self.stopping=False
+        from .automation import Automation
+        self.automation=Automation(engine)
+    def links(self,item,result):
+        request=item['request'];is_sitemap=result.get('acquisition')=='sitemap'
+        depth=item['depth']+(0 if is_sitemap else 1)
+        if item['kind'] not in ('crawl','map') or depth>request['max_depth']:return []
+        if request.get('sitemap')=='only' and not is_sitemap:return []
+        seeds=request['urls'];out=[]
+        for link in result.get('discovered_links',[]):
+            try:
+                url=normalize_url(link['url']);parts=urlsplit(url);path=parts.path
+                allowed=False
+                for seed in seeds:
+                    root=urlsplit(seed);same=origin(url)==origin(seed)
+                    sub=request.get('allow_subdomains',False) and parts.scheme==root.scheme and parts.hostname.endswith('.'+root.hostname)
+                    external=request.get('allow_external_links',False)
+                    if not (same or sub or external):continue
+                    prefix=root.path.rsplit('/',1)[0]+'/' if '.' in root.path.rsplit('/',1)[-1] else root.path.rstrip('/')+'/'
+                    if request.get('crawl_entire_domain',True) or path==root.path or path.startswith(prefix):allowed=True
+                if not allowed:continue
+                xml=parts.path.endswith(('.xml','.xml.gz'))
+                if not xml and request['include_paths'] and not any(fnmatch.fnmatch(path,p) for p in request['include_paths']):continue
+                if any(fnmatch.fnmatch(path,p) for p in request['exclude_paths']):continue
+                if request.get('sitemap')=='skip' and xml:continue
+                if request.get('ignore_query_parameters'):url=urlunsplit((parts.scheme,parts.netloc,parts.path,'',''))
+                out.append((url,depth))
+            except ScrapeError:pass
+        return list(dict.fromkeys(out))
+    async def process(self,item):
+        start=time.monotonic();current=asyncio.current_task()
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(2)
+                try:alive=self.store.heartbeat(item,self.engine.settings.lease_seconds)
+                except psycopg.Error:alive=False
+                if not alive:
+                    current.cancel();return
+        watch=asyncio.create_task(heartbeat())
+        from .model_budget import current_budget,ModelBudget
+        context=current_budget.set(ModelBudget(self.engine.settings,self.store,item))
+        try:
+            options=Options.model_validate(item['request']['options'])
+            remaining=item['request']['max_download_bytes']-item['bytes']
+            options.max_bytes=min(options.max_bytes,remaining,item['allowed_bytes'])
+            if item['kind']=='map':options.formats=['links'];options.render='never'
+            seconds=max(.001,item['request']['max_seconds']-item['spent_ms']/1000)
+            async with asyncio.timeout(seconds):
+                if item['kind']=='agent':
+                    from .agent import Agent
+                    result=await Agent(self.engine).run(item)
+                elif urlsplit(item['url']).path.endswith(('.xml','.xml.gz')):
+                    if not await self.engine.network.allowed(item['url'],not options.respect_robots):raise ScrapeError('ROBOTS_DENIED','Sitemap excluded by robots.txt',403)
+                    response=await self.engine.network.fetch(item['url'],max_bytes=options.max_bytes)
+                    if b'<!DOCTYPE' in response.body.upper() or b'<!ENTITY' in response.body.upper():raise ScrapeError('UNSAFE_XML','XML external entities are forbidden')
+                    body=response.body
+                    if urlsplit(item['url']).path.endswith('.gz'):
+                        import gzip,io
+                        with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:body=compressed.read(options.max_bytes+1)
+                        if len(body)>options.max_bytes:raise ScrapeError('RESPONSE_TOO_LARGE','Expanded sitemap exceeds its byte budget',413)
+                    if b'<!DOCTYPE' in body.upper() or b'<!ENTITY' in body.upper():raise ScrapeError('UNSAFE_XML','XML declarations are forbidden')
+                    root=ET.fromstring(body);links=[]
+                    for node in root.iter():
+                        if node.tag.split('}')[-1]=='loc' and node.text:
+                            try:links.append({'url':normalize_url(node.text.strip())})
+                            except ScrapeError:pass
+                    result={'url':item['url'],'data':{'links':links},'discovered_links':links,'acquisition':'sitemap','complete':True,'usage':{'download_bytes':len(response.body)}}
+                else:result=await self.engine.scrape(item['tenant'],item['url'],options)
+            links=self.links(item,result)
+            if item['depth']==0 and item['kind'] in ('crawl','map') and item['request'].get('sitemap','include')!='skip':
+                sitemap=origin(item['url'])+'/sitemap.xml'
+                if sitemap!=item['url']:links.append((sitemap,item['depth']))
+                cached=getattr(self.engine.network,'robots',{}).get(origin(item['url']))
+                for advertised in (cached[1].site_maps() or []) if cached else []:
+                    links.extend(self.links({**item,'depth':max(-1,item['depth']-1)},{'acquisition':'sitemap','discovered_links':[{'url':advertised}]}))
+            self.store.finish(item,result,links,error=not result.get('complete',True),elapsed_ms=round((time.monotonic()-start)*1000))
+        except asyncio.CancelledError:
+            self.store.retry(item,0)
+            raise
+        except ScrapeError as e:
+            if e.code in ('PROVIDER_TOKEN_BUDGET','PROVIDER_COST_BUDGET','PROVIDER_LIMIT_VIOLATION'):
+                self.store.pause_for_budget(item,e.code)
+            elif e.retryable and item['attempts']<3:self.store.retry(item,getattr(e,'retry_after',min(60,2**item['attempts']+random.random())))
+            else:self.store.finish(item,{'url':item['url'],'error':{'code':e.code,'message':e.message},'complete':False},error=True,elapsed_ms=round((time.monotonic()-start)*1000))
+        except TimeoutError:
+            self.store.finish(item,{'url':item['url'],'error':{'code':'TIME_BUDGET','message':'Execution budget exhausted'},'complete':False},error=True,elapsed_ms=round((time.monotonic()-start)*1000))
+        except Exception:
+            self.store.finish(item,{'url':item['url'],'error':{'code':'PROCESSING_FAILED','message':'Page processing failed; inspect server diagnostics'},'complete':False},error=True)
+        finally:
+            current_budget.reset(context)
+            watch.cancel();await asyncio.gather(watch,return_exceptions=True)
+    def completed(self,task):
+        self.tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logging.getLogger(__name__).error('Page task failed; its database lease will recover')
+
+    async def run(self):
+        last_cleanup=0;failures=0
+        try:
+            while not self.stopping:
+                try:
+                    self.store.recover();self.store.settle()
+                    await self.automation.tick();await self.automation.deliver()
+                    if time.monotonic()-last_cleanup>3600:
+                        self.store.expire(self.engine.settings.retention_days);self.engine.artifacts.expire(self.engine.settings.retention_days);last_cleanup=time.monotonic()
+                    while len(self.tasks)<self.engine.settings.workers:
+                        item=self.store.claim(self.engine.settings.lease_seconds)
+                        if not item:break
+                        task=asyncio.create_task(self.process(item));self.tasks.add(task);task.add_done_callback(self.completed)
+                    failures=0
+                except psycopg.Error:
+                    failures+=1
+                    logging.getLogger(__name__).warning("Worker database unavailable; retrying scheduler")
+                    await asyncio.sleep(min(15,2**min(failures,4)))
+                    continue
+                await asyncio.sleep(.15 if self.tasks else .5)
+        finally:
+            for task in list(self.tasks):task.cancel()
+            await asyncio.gather(*self.tasks,return_exceptions=True)

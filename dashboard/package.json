@@ -1,0 +1,23 @@
+{
+  "name": "houndcrawler-dashboard",
+  "version": "0.2.0-rc.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build --outDir ../src/houndcrawler/static --emptyOutDir",
+    "typecheck": "tsc --noEmit",
+    "postbuild": "node -e \"require('node:fs').copyFileSync('../sdk/js/index.mjs','../src/houndcrawler/static/sdk.mjs')\""
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.4.6",
+    "@playwright/test": "^1.65.1",
+    "@axe-core/playwright": "^4.14.0"
+  }
+}
