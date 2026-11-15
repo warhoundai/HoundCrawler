@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{name = "WarHound AI"}]
-dependencies = ["fastapi>=0.162,<1", "uvicorn>=0.54,<1", "aiohttp>=3.13,<4", "httpx>=0.28.1,<0.29", "psycopg[binary,pool]>=3.2,<4", "beautifulsoup4>=4.13,<5", "markdownify>=1.2,<2", "cryptography>=50,<51", "jsonschema>=4.25,<5", "croniter>=6,<7"]
+dependencies = ["fastapi>=0.162,<1", "uvicorn>=0.54,<1", "aiohttp>=3.13,<4", "httpx>=0.28.1,<0.29", "psycopg[binary,pool]>=3.2,<4", "beautifulsoup4>=4.13,<5", "markdownify>=1.2,<2", "cryptography>=50,<51", "jsonschema>=4.25,<5", "croniter>=6,<8"]
 [project.optional-dependencies]
 browser = ["playwright==1.65.1"]
 parser = ["docling[audio]>=2,<3"]
