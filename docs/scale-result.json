@@ -1,0 +1,12 @@
+{
+  "fixture": "synthetic real HTTP via injected test-only resolver",
+  "html_pages": 10000,
+  "expected": 10000,
+  "elapsed_seconds": 478.719169461,
+  "status": "completed",
+  "cpu_count": 2,
+  "platform": "Linux-7.0.0-1017-azure-x86_64-with-glibc2.39",
+  "memory_kib": 8122984,
+  "commit": "4c727e3718e9f561a39ee51ab7e7f9f9ff6a32fb",
+  "comparison": "not run"
+}
