@@ -209,4 +209,13 @@ def create_app(settings=None,*,store=None,engine=None,run_worker=True):
         app.add_api_route('/'+name,serve(name),methods=['GET'],include_in_schema=False)
     from .compat import install
     install(app,eng,db)
+    default_openapi=app.openapi
+    def secured_openapi():
+        schema=default_openapi();schema.setdefault('components',{}).setdefault('securitySchemes',{})['InstanceKey']={'type':'http','scheme':'bearer'}
+        for path,methods in schema.get('paths',{}).items():
+            if path not in ('/health','/','/sdk.mjs') and not path.startswith('/assets/'):
+                for operation in methods.values():
+                    if isinstance(operation,dict):operation['security']=[{'InstanceKey':[]}]
+        return schema
+    app.openapi=secured_openapi
     return app
